@@ -209,7 +209,7 @@ static int tasks_info(int argc, char **argv)
 
             uint32_t stackUsedPct = 100 * (stackSize - pxTaskStatusArray[x].usStackHighWaterMark) / stackSize;
 
-            printf("%-18s\t%d\t%c\t%d\t%d\t0x%08x\t%2d%%\t%04x\t%04x\t%04x (%02d%%)\t%08p\n",
+            printf("%-18s\t%d\t%c\t%d\t%d\t0x%08x\t%2d%%\t%04x\t%04x\t%04x (%2d%%)\t%08p\n",
                    pxTaskStatusArray[x].pcTaskName,
                    pxTaskStatusArray[x].xTaskNumber,
                    printableTaskState(pxTaskStatusArray[x].eCurrentState),
@@ -233,13 +233,13 @@ static int tasks_info(int argc, char **argv)
     }
 
     size_t rtos_heap_size = xPortGetFreeHeapSize();
-    ESP_LOGI(TAG, "rtos heap size: 0x%08x (%7u)", rtos_heap_size, rtos_heap_size);
+    ESP_LOGI(TAG, "rtos heap size:     0x%08x (%7u)", rtos_heap_size, rtos_heap_size);
 
     uint32_t min_heap_size = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
-    ESP_LOGI(TAG, "min heap size:  0x%08x (%7u)", min_heap_size, min_heap_size);
+    ESP_LOGI(TAG, "min heap size:      0x%08x (%7u)", min_heap_size, min_heap_size);
 
     size_t heap_size = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "ESP heap size:  0x%08x (%7u)", heap_size, heap_size);
+    ESP_LOGI(TAG, "ESP heap size:      0x%08x (%7u)", heap_size, heap_size);
 
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "largest free block: 0x%08x (%7u)", largest_block, largest_block);
