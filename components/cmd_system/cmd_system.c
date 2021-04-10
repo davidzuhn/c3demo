@@ -40,6 +40,8 @@ static void register_light_sleep(void);
 static void register_tasks(void);
 #endif
 
+static void register_time(void);
+
 void register_system_common(void)
 {
     register_free();
@@ -49,6 +51,7 @@ void register_system_common(void)
 #if WITH_TASKS_INFO
     register_tasks();
 #endif
+    register_time();
 }
 
 void register_system_sleep(void)
@@ -439,4 +442,41 @@ static void register_light_sleep(void)
         .argtable = &light_sleep_args
     };
     ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
+}
+
+
+
+
+static int time_info(int argc, char **argv)
+{
+    time_t now;
+    char strftime_buf[64];
+    struct tm timeinfo;
+
+    time(&now);
+
+    setenv("TZ", "UTC", 1);
+    tzset();
+
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    ESP_LOGI(TAG, "The current date/time in UTC is: %s", strftime_buf);
+
+    return ESP_OK;
+}
+
+
+
+static void
+register_time(void)
+{
+    const esp_console_cmd_t cmd = {
+        .command = "time",
+        .help = "Display the current time",
+        .hint = NULL,
+        .func = &time_info,
+    };
+    ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
+
+
 }
