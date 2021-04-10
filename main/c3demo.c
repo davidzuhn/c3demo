@@ -36,8 +36,8 @@ static const char* TAG = "example";
 /* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
    or you can edit the following line and set a number here.
 */
-#define BLINK_GPIO CONFIG_BLINK_GPIO
-#define OPPOSITE_GPIO CONFIG_BLINK_OPPOSITE_GPIO
+#define BLINK_GPIO ((gpio_num_t) CONFIG_BLINK_GPIO)
+#define OPPOSITE_GPIO ((gpio_num_t) CONFIG_BLINK_OPPOSITE_GPIO)
 
 static uint8_t s_led_state = 0;
 
@@ -180,7 +180,6 @@ void pilotLights(void *params)
         vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
     }
 }
-
 
 
 void app_main(void)
