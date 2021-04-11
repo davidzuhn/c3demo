@@ -22,6 +22,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cmd_system.h"
+
+#include "services/bas/ble_svc_bas.h"
+
 #include "sdkconfig.h"
 
 #ifdef CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
@@ -39,7 +42,7 @@ static void register_light_sleep(void);
 #if WITH_TASKS_INFO
 static void register_tasks(void);
 #endif
-
+static void register_battery(void);
 static void register_time(void);
 
 void register_system_common(void)
@@ -51,6 +54,7 @@ void register_system_common(void)
 #if WITH_TASKS_INFO
     register_tasks();
 #endif
+    register_battery();
     register_time();
 }
 
@@ -477,6 +481,49 @@ register_time(void)
         .func = &time_info,
     };
     ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
+}
+
+static struct {
+    struct arg_int *level;
+    struct arg_end *end;
+} battery_args;
 
 
+static int battery_cmd(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **) &battery_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, battery_args.end, argv[0]);
+        return 1;
+    }
+    if (battery_args.level->count) {
+        int level = battery_args.level->ival[0];
+        if (level >= 0 && level <= 100) {
+            ble_svc_bas_battery_level_set((uint8_t) level);
+        }
+        else {
+            ESP_LOGE(TAG, "level must be in range 0..100");
+            return 1;
+        }
+    }
+
+    return ESP_OK;
+}
+
+
+static void
+register_battery(void)
+{
+    int num_args = 1;
+    battery_args.level = arg_int0("l", "level", "<l>", "level as percentage of full");
+    battery_args.end = arg_end(num_args);
+
+    const esp_console_cmd_t cmd = {
+        .command = "battery",
+        .help = "Set the current battery level",
+        .hint = NULL,
+        .func = &battery_cmd,
+        .argtable = &battery_args
+    };
+    ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
 }
