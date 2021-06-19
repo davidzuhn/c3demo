@@ -216,7 +216,7 @@ static int tasks_info(int argc, char **argv)
 
             uint32_t stackUsedPct = 100 * (stackSize - pxTaskStatusArray[x].usStackHighWaterMark) / stackSize;
 
-            printf("%-18s\t%d\t%c\t%d\t%d\t0x%08x\t%2d%%\t%04x\t%04x\t%04x (%2d%%)\t%08p\n",
+            printf("%-18s\t%d\t%c\t%d\t%d\t0x%08x\t%2d%%\t%04x\t%04x\t%04x (%2d%%)\t%p\n",
                    pxTaskStatusArray[x].pcTaskName,
                    pxTaskStatusArray[x].xTaskNumber,
                    printableTaskState(pxTaskStatusArray[x].eCurrentState),

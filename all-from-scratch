@@ -9,9 +9,7 @@ fi
 set -e
 
 rm -rf build sdkconfig
-
 idf.py set-target esp32c3
-
 idf.py fullclean
 idf.py build
 

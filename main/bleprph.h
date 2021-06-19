@@ -92,8 +92,10 @@ void print_mbuf(const struct os_mbuf *om);
 /** GATT server. */
 #define GATT_SVR_SVC_ALERT_UUID               0x1811
 
-#define GATT_SVC_CTS_UUID         0x1805
-#define GATT_CHR_CURRENT_TIME_UUID  0x2A2B
+#define GATT_SVC_CTS_UUID              0x1805
+#define GATT_CHR_CURRENT_TIME_UUID     0x2A2B
+#define GATT_CHR_LOCAL_TIME_INFO_UUID  0x2a0f
+
 
 void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 int gatt_svr_init(void);

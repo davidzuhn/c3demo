@@ -42,15 +42,16 @@ print_mbuf(const struct os_mbuf *om)
 {
     int colon, i;
 
+    ESP_LOGI("misc", "printing mbuf, len=%d", om->om_len);
     colon = 0;
     while (om != NULL) {
         if (colon) {
-            MODLOG_DFLT(INFO, ":");
+            //MODLOG_DFLT(INFO, ":");
         } else {
             colon = 1;
         }
         for (i = 0; i < om->om_len; i++) {
-            MODLOG_DFLT(INFO, "%s0x%02x", i != 0 ? ":" : "", om->om_data[i]);
+            ESP_LOGI("misc", "i=%d, 0x%02x", i, om->om_data[i]);
         }
         om = SLIST_NEXT(om, om_next);
     }

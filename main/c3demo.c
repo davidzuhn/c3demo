@@ -7,12 +7,16 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <stdio.h>
+#include <sys/errno.h>
+#include <sys/time.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "led_strip.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -28,6 +32,7 @@
 #include "console/console.h"
 #include "services/gap/ble_svc_gap.h"
 #include "bleprph.h"
+#include "host/ble_uuid.h"
 
 
 #include "sdkconfig.h"
@@ -317,21 +322,139 @@ bleprph_advertise(void)
 }
 
 
+
+void
+update_date_time(struct os_mbuf *om)
+{
+    uint8_t buf[10];
+    if (om->om_len == 10) {
+        uint16_t actual;
+        int rc = ble_hs_mbuf_to_flat(om, buf, 10, &actual);
+        if (rc==0 && actual==10) {
+            int reason=buf[9];
+            //int frac256 = buf[8];
+            //int dayOfWeek = buf[7];
+            int year = buf[1]*256 + buf[0];
+            int month = buf[2];
+            int day = buf[3];
+            int hours= buf[4];
+            int minutes = buf[5];
+            int seconds = buf[6];
+
+            ESP_LOGI(TAG, "set date from peer: %2d:%02d:%02d %d-%d-%4d, reason:%d",
+                     hours, minutes, seconds, day, month, year, reason);
+
+            struct tm tm;
+
+            tm.tm_hour = hours;
+            tm.tm_min = minutes;
+            tm.tm_sec = seconds;
+
+            tm.tm_mday = day;
+            tm.tm_mon  = month - 1;
+            tm.tm_year = year - 1900;
+
+            struct timeval tv;
+            memset(&tv, 0, sizeof(tv));
+            tv.tv_sec = mktime(&tm);
+            tv.tv_usec = 0;
+
+            if (settimeofday(&tv, NULL) != 0) {
+                ESP_LOGE(TAG, "unable to set time/date: %s", strerror(errno));
+            }
+
+        }
+        else {
+            ESP_LOGE(TAG, "error flattening: rc=%d actual=%d", rc, actual);
+        }
+    }
+    else {
+        ESP_LOGI(TAG, "date_time unexpectedly contains %d bytes", om->om_len);
+    }
+}
+
+
+
+void
+update_local_time(struct os_mbuf *om)
+{
+    // TODO - save values in a global value, so that we can use them when we
+    // get the values for the current time
+
+    uint8_t buf[2];
+    if (om->om_len == 2) {
+        uint16_t actual;
+        int rc = ble_hs_mbuf_to_flat(om, buf, 2, &actual);
+        if (rc==0 && actual==2) {
+            int tzOffset = buf[0];
+            int dst = buf[1];
+
+            ESP_LOGI(TAG, "set tz from peer: 0x%02x 0x%02x", tzOffset, dst);
+
+            int minutesOffset = (tzOffset * 15);
+            switch (dst) {
+                case 2:
+                    minutesOffset += 30;
+                    break;
+                case 4:
+                    minutesOffset += 60;
+                    break;
+                case 8:
+                    minutesOffset += 120;
+                    break;
+                case 0:
+                default:
+                    // no change
+                    break;
+            }
+            ESP_LOGI(TAG, "  timezone difference is %d", minutesOffset);
+        }
+        else {
+            ESP_LOGE(TAG, "error flattening: rc=%d actual=%d", rc, actual);
+        }
+    }
+    else {
+        ESP_LOGI(TAG, "local_time unexpectedly contains %d bytes", om->om_len);
+    }
+}
+
+
 /**
  * Application callback.  Called when the read of the ANS Supported New Alert
  * Category characteristic has completed.
  */
 static int
-bleprph_on_read(uint16_t conn_handle,
+bleprph_on_cts_read(uint16_t conn_handle,
                 const struct ble_gatt_error *error,
                 struct ble_gatt_attr *attr,
                 void *arg)
 {
-    ESP_LOGI(TAG, "Read complete; status=%d conn_handle=%d", error->status,
+    ESP_LOGI(TAG, "CTS read complete; status=%04x conn_handle=%d", error->status,
                 conn_handle);
     if (error->status == 0) {
-        ESP_LOGI(TAG, " attr_handle=%d value=", attr->handle);
-        print_mbuf(attr->om);
+        ESP_LOGI(TAG, " len=%d attr_handle=%d value=", attr->om->om_len, attr->handle);
+        update_date_time(attr->om);
+    }
+
+    return 0;
+}
+
+
+/**
+ * Application callback.  Called when the read of the ANS Supported New Alert
+ * Category characteristic has completed.
+ */
+static int
+bleprph_on_localtime_read(uint16_t conn_handle,
+                const struct ble_gatt_error *error,
+                struct ble_gatt_attr *attr,
+                void *arg)
+{
+    ESP_LOGI(TAG, "Localtime read complete; status=%04x conn_handle=%d", error->status,
+                conn_handle);
+    if (error->status == 0) {
+        ESP_LOGI(TAG, " len=%d attr_handle=%d value=", attr->om->om_len, attr->handle);
+        update_local_time(attr->om);
     }
 
     return 0;
@@ -340,10 +463,9 @@ bleprph_on_read(uint16_t conn_handle,
 
 /**
  * Performs three GATT operations against the specified peer:
- * 1. Reads the ANS Supported New Alert Category characteristic.
- * 2. After read is completed, writes the ANS Alert Notification Control Point characteristic.
- * 3. After write is completed, subscribes to notifications for the ANS Unread Alert Status
- *    characteristic.
+ * 1. Reads the CTS current time characteristic
+ * 2. Reads the Local Time Info (time zone, DST)
+ *
  *
  * If the peer does not support a required service, characteristic, or
  * descriptor, then the peer lied when it claimed support for the alert
@@ -357,27 +479,38 @@ bleprph_read_subscribe_cts(const struct peer *peer)
     const struct peer_chr *chr;
     int rc;
 
+    /* Read the Local Time Info (Timezone) characteristic of the Current Time service. */
+    chr = peer_chr_find_uuid(peer,
+                             BLE_UUID16_DECLARE(GATT_SVC_CTS_UUID),
+                             BLE_UUID16_DECLARE(GATT_CHR_LOCAL_TIME_INFO_UUID));
+    if (chr == NULL) {
+        ESP_LOGE(TAG, "Error: Peer doesn't support the Local Time info characteristic");
+        return;
+    }
+
+    rc = ble_gattc_read(peer->conn_handle, chr->chr.val_handle,
+                        bleprph_on_localtime_read, NULL);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Error: Failed to read local time characteristic; rc=%d\n", rc);
+    }
+
     /* Read the Current Time characteristic of the Current Time service. */
     chr = peer_chr_find_uuid(peer,
                              BLE_UUID16_DECLARE(GATT_SVC_CTS_UUID),
                              BLE_UUID16_DECLARE(GATT_CHR_CURRENT_TIME_UUID));
     if (chr == NULL) {
-        ESP_LOGE(TAG, "Error: Peer doesn't support the Current Time Service");
-        goto err;
+        ESP_LOGE(TAG, "Error: Peer doesn't support the Current Time characteristic");
+        return;
     }
 
     rc = ble_gattc_read(peer->conn_handle, chr->chr.val_handle,
-                        bleprph_on_read, NULL);
+                        bleprph_on_cts_read, NULL);
     if (rc != 0) {
-        MODLOG_DFLT(ERROR, "Error: Failed to read characteristic; rc=%d\n",
-                    rc);
-        goto err;
+        MODLOG_DFLT(ERROR, "Error: Failed to read CTS characteristic; rc=%d\n", rc);
     }
 
+    ESP_LOGI(TAG, "tried to read both CTS & local time info");
     return;
-err:
-    /* Terminate the connection. */
-    ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
 }
 
 
@@ -387,11 +520,10 @@ err:
 static void
 bleprph_on_disc_complete(const struct peer *peer, int status, void *arg)
 {
-
     if (status != 0) {
         /* Service discovery failed.  Terminate the connection. */
-        MODLOG_DFLT(ERROR, "Error: Service discovery failed; status=%04x "
-                    "conn_handle=%d\n", status, peer->conn_handle);
+        ESP_LOGE(TAG, "Error: Service discovery failed; status=%04x "
+                 "conn_handle=%d\n", status, peer->conn_handle);
         ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return;
     }
@@ -400,12 +532,41 @@ bleprph_on_disc_complete(const struct peer *peer, int status, void *arg)
      * list of services, characteristics, and descriptors that the peer
      * supports.
      */
-    MODLOG_DFLT(ERROR, "Peer service discovery complete; status=%04x "
-                "conn_handle=%d\n", status, peer->conn_handle);
+    ESP_LOGI(TAG, "Peer service discovery complete; status=%04x "
+             "conn_handle=%d\n", status, peer->conn_handle);
 
-    /* Now read & subscribe to the Current Time Service
-     */
+
+    char buf[BLE_UUID_STR_LEN];
+    struct peer_svc *svc;
+    SLIST_FOREACH(svc, &peer->svcs, next) {
+        char *s = ble_uuid_to_str(&(svc->svc.uuid.u), buf);
+        ESP_LOGI(TAG, "found a service: %s", s);
+
+        struct peer_chr *chr;
+        SLIST_FOREACH(chr, &svc->chrs, next) {
+            char *c = ble_uuid_to_str(&(chr->chr.uuid.u), buf);
+            ESP_LOGI(TAG, "  and a characteristic: %s", c);
+        }
+    }
+
+
+
+
+
+#if 0
+    /* Now read & subscribe to the Current Time Service */
     bleprph_read_subscribe_cts(peer);
+#endif
+
+#if 1
+        /* Initiate connection security */
+        ESP_LOGI(TAG, "initiate gap security after discovery");
+        int rc = ble_gap_security_initiate(peer->conn_handle);
+        if (rc != 0) {
+            MODLOG_DFLT(ERROR, "Failed to initialize securiry; rc=%d\n", rc);
+        }
+#endif
+
 }
 
 
@@ -450,7 +611,19 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
             return 0;
         }
 
-#if 0
+#define TRY_SECURITY 0
+#define DISCOVER_ON_PEER 1
+
+#if DISCOVER_ON_PEER
+        ESP_LOGI(TAG, "perform service discovery, handle=%d", event->connect.conn_handle);
+        rc = peer_disc_all(event->connect.conn_handle,
+                           bleprph_on_disc_complete, NULL);
+        if (rc != 0) {
+            MODLOG_DFLT(ERROR, "Failed to discover services; rc=%d\n", rc);
+            return 0;
+        }
+#endif
+#if TRY_SECURITY
         /* Initiate connection security */
         ESP_LOGI(TAG, "initiate gap security");
         rc = ble_gap_security_initiate(event->connect.conn_handle);
@@ -460,13 +633,6 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
         }
 #endif
 
-        ESP_LOGI(TAG, "perform service discovery");
-        rc = peer_disc_all(event->connect.conn_handle,
-                           bleprph_on_disc_complete, NULL);
-        if (rc != 0) {
-            MODLOG_DFLT(ERROR, "Failed to discover services; rc=%d\n", rc);
-            return 0;
-        }
 
         if (event->connect.status != 0) {
             /* Connection failed; resume advertising. */
@@ -508,6 +674,20 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
         assert(rc == 0);
         bleprph_print_conn_desc(&desc);
 
+#if 1
+        if(desc.sec_state.encrypted) {
+            static bool tried_to_subscribe = false;
+            /* Now read & subscribe to the Current Time Service */
+            if (!tried_to_subscribe) {
+                struct peer *peer = peer_find(event->enc_change.conn_handle);
+                if (peer) {
+                    ESP_LOGI(TAG, "subscribing to CTS/local time info");
+                    bleprph_read_subscribe_cts(peer);
+                }
+                tried_to_subscribe = true;
+            }
+        }
+#endif
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
@@ -558,7 +738,17 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
          * continue with the pairing operation.
          */
         return BLE_GAP_REPEAT_PAIRING_RETRY;
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        ESP_LOGI(TAG, "phy event: rx=%d tx=%d", event->phy_updated.rx_phy, event->phy_updated.tx_phy);
+        break;
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        break;
+
+    default:
+        ESP_LOGE(TAG, "unexpected GAP event: %d", event->type);
+        break;
     }
+
 
     return 0;
 }
@@ -621,8 +811,10 @@ initialize_ble()
     ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-#if 0
+#if 1
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = 1;
     ble_hs_cfg.sm_their_key_dist = 1;
 #endif
@@ -664,7 +856,7 @@ void app_main(void)
     //register_wifi();
     register_nvs();
 
-    xTaskCreate(pilotLights, "pilot", 0x0220, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(pilotLights, "pilot", 0x1000, NULL, tskIDLE_PRIORITY, NULL);
 
         /* Prompt to be printed before each line.
      * This can be customized, made dynamic, etc.

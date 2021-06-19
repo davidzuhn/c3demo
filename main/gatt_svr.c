@@ -77,7 +77,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                 /*** Characteristic: Static value. */
                 .uuid = &gatt_svr_chr_sec_test_static_uuid.u,
                 .access_cb = gatt_svr_chr_access_sec_test,
-                .flags = BLE_GATT_CHR_F_READ |
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
                 BLE_GATT_CHR_F_WRITE
             }, {
                 0, /* No more characteristics in this service. */
