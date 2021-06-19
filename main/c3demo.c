@@ -323,6 +323,10 @@ bleprph_advertise(void)
 
 
 
+long timeZoneOffset = 0;
+int  isDST = false;
+
+
 void
 update_date_time(struct os_mbuf *om)
 {
@@ -354,13 +358,22 @@ update_date_time(struct os_mbuf *om)
             tm.tm_mon  = month - 1;
             tm.tm_year = year - 1900;
 
+            tm.tm_isdst = isDST;
+
             struct timeval tv;
             memset(&tv, 0, sizeof(tv));
-            tv.tv_sec = mktime(&tm);
-            tv.tv_usec = 0;
 
-            if (settimeofday(&tv, NULL) != 0) {
-                ESP_LOGE(TAG, "unable to set time/date: %s", strerror(errno));
+            time_t actualTime = mktime(&tm);
+            if (actualTime != -1) {
+                tv.tv_sec = actualTime - timeZoneOffset;
+                tv.tv_usec = 0;
+
+                if (settimeofday(&tv, NULL) != 0) {
+                    ESP_LOGE(TAG, "unable to set time/date: %s", strerror(errno));
+                }
+            }
+            else {
+                ESP_LOGE(TAG, "unable to call mktime");
             }
 
         }
@@ -386,7 +399,7 @@ update_local_time(struct os_mbuf *om)
         uint16_t actual;
         int rc = ble_hs_mbuf_to_flat(om, buf, 2, &actual);
         if (rc==0 && actual==2) {
-            int tzOffset = buf[0];
+            int tzOffset = (int8_t)buf[0];
             int dst = buf[1];
 
             ESP_LOGI(TAG, "set tz from peer: 0x%02x 0x%02x", tzOffset, dst);
@@ -408,6 +421,9 @@ update_local_time(struct os_mbuf *om)
                     break;
             }
             ESP_LOGI(TAG, "  timezone difference is %d", minutesOffset);
+
+            timeZoneOffset = minutesOffset * 60;
+            isDST = (dst != 0);
         }
         else {
             ESP_LOGE(TAG, "error flattening: rc=%d actual=%d", rc, actual);
@@ -420,8 +436,8 @@ update_local_time(struct os_mbuf *om)
 
 
 /**
- * Application callback.  Called when the read of the ANS Supported New Alert
- * Category characteristic has completed.
+ * Application callback.  Called when the read of the Current Time Service
+ * characteristic has completed.
  */
 static int
 bleprph_on_cts_read(uint16_t conn_handle,
@@ -440,9 +456,11 @@ bleprph_on_cts_read(uint16_t conn_handle,
 }
 
 
+static void bleprph_read_subscribe_cts(const struct peer *peer);
+
 /**
- * Application callback.  Called when the read of the ANS Supported New Alert
- * Category characteristic has completed.
+ * Application callback.  Called when the read of the Local Time Info
+ * characteristic has completed.
  */
 static int
 bleprph_on_localtime_read(uint16_t conn_handle,
@@ -457,24 +475,24 @@ bleprph_on_localtime_read(uint16_t conn_handle,
         update_local_time(attr->om);
     }
 
+    const struct peer *peer = (struct peer *) arg;
+    bleprph_read_subscribe_cts(peer);
+
     return 0;
 }
 
 
 /**
- * Performs three GATT operations against the specified peer:
- * 1. Reads the CTS current time characteristic
- * 2. Reads the Local Time Info (time zone, DST)
- *
- *
- * If the peer does not support a required service, characteristic, or
- * descriptor, then the peer lied when it claimed support for the alert
- * notification service!  When this happens, or if a GATT procedure fails,
- * this function immediately terminates the connection.
+ * Initiates a sequence of GATT operations against the specified peer:
+ * 1. Reads the Local Time Info (time zone, DST)
+ * 2. Local Time callback function will save time zone & DST for later use, then
+ * 3. Local Time callback reads the CTS current time characteristic
+ * 4. Current Time callback will convert the time to epoch time, and then
+ *    using the saved time zone info, set the time on the device
  */
 
 static void
-bleprph_read_subscribe_cts(const struct peer *peer)
+bleprph_read_local_time_info(const struct peer *peer)
 {
     const struct peer_chr *chr;
     int rc;
@@ -484,15 +502,24 @@ bleprph_read_subscribe_cts(const struct peer *peer)
                              BLE_UUID16_DECLARE(GATT_SVC_CTS_UUID),
                              BLE_UUID16_DECLARE(GATT_CHR_LOCAL_TIME_INFO_UUID));
     if (chr == NULL) {
-        ESP_LOGE(TAG, "Error: Peer doesn't support the Local Time info characteristic");
+        ESP_LOGE(TAG, "Error: Peer doesn't support the Local Time Info characteristic");
         return;
     }
 
     rc = ble_gattc_read(peer->conn_handle, chr->chr.val_handle,
-                        bleprph_on_localtime_read, NULL);
+                        bleprph_on_localtime_read, (void*)peer);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "Error: Failed to read local time characteristic; rc=%d\n", rc);
+        return;
     }
+}
+
+
+static void
+bleprph_read_subscribe_cts(const struct peer *peer)
+{
+    const struct peer_chr *chr;
+    int rc;
 
     /* Read the Current Time characteristic of the Current Time service. */
     chr = peer_chr_find_uuid(peer,
@@ -504,7 +531,7 @@ bleprph_read_subscribe_cts(const struct peer *peer)
     }
 
     rc = ble_gattc_read(peer->conn_handle, chr->chr.val_handle,
-                        bleprph_on_cts_read, NULL);
+                        bleprph_on_cts_read, peer);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "Error: Failed to read CTS characteristic; rc=%d\n", rc);
     }
@@ -682,9 +709,15 @@ bleprph_gap_event(struct ble_gap_event *event, void *arg)
                 struct peer *peer = peer_find(event->enc_change.conn_handle);
                 if (peer) {
                     ESP_LOGI(TAG, "subscribing to CTS/local time info");
-                    bleprph_read_subscribe_cts(peer);
+                    bleprph_read_local_time_info(peer);
+                }
+                else {
+                    ESP_LOGI(TAG, "no peer found");
                 }
                 tried_to_subscribe = true;
+            }
+            else {
+                ESP_LOGI(TAG, "tried to subscribe already");
             }
         }
 #endif
